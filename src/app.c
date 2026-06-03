@@ -395,6 +395,110 @@ static void wg_handle_key(const char *key) {
 }
 
 /* ================================================================
+ * Ollama chat
+ * ================================================================ */
+
+static int  ollama_active  = 0;
+static int  ollama_waiting = 0;  /* 1 = response in flight */
+static char ollama_model[64]  = "";
+
+static void ollama_prompt(void) {
+    sgr("1;32");
+    app_puts("You: ");
+    sgr("0");
+}
+
+/* Called by JS with each streamed token */
+EMSCRIPTEN_KEEPALIVE void ollama_receive(const char *text) {
+    if (text) app_puts(text);
+}
+
+/* Called by JS when the full response has been received */
+EMSCRIPTEN_KEEPALIVE void ollama_ready(void) {
+    ollama_waiting = 0;
+    if (!ollama_active) return;
+    app_puts("\r\n\r\n");
+    ollama_prompt();
+}
+
+/* Called by JS on connection / API error */
+EMSCRIPTEN_KEEPALIVE void ollama_error(const char *msg) {
+    ollama_waiting = 0;
+    if (!ollama_active) return;
+    sgr("1;31");
+    app_printf("\r\nError: %s\r\n", msg ? msg : "unknown error");
+    sgr("0;32");
+    app_puts("Type /quit to exit.\r\n\r\n");
+    ollama_prompt();
+}
+
+static void cmd_ollama(const char *model_arg) {
+    strncpy(ollama_model, (strlen(model_arg) > 0) ? model_arg : "", 63);
+    ollama_active  = 1;
+    ollama_waiting = 1;
+
+    clear_screen();
+    sgr("1;32");
+    app_puts("OLLAMA CHAT\r\n");
+    sgr("0;32");
+    app_puts("Connecting to Ollama... (type /quit to exit)\r\n\r\n");
+    sgr("0");
+
+    EM_ASM({
+        Module.ollamaInit(UTF8ToString($0));
+    }, ollama_model);
+}
+
+static void ollama_handle_key(const char *key) {
+    if (ollama_waiting) return;
+
+    if (strcmp(key, "Enter") == 0) {
+        line_buf[line_len] = '\0';
+        const char *input = line_buf;
+        while (*input == ' ') input++;
+
+        if (strcmp(input, "/quit") == 0) {
+            ollama_active = 0;
+            line_len = 0;
+            sgr("0;32");
+            app_puts("\r\nChat ended.\r\n\r\n");
+            sgr("0");
+            print_prompt();
+            return;
+        }
+
+        if (strlen(input) == 0) {
+            app_puts("\r\n");
+            ollama_prompt();
+            line_len = 0;
+            return;
+        }
+
+        ollama_waiting = 1;
+        app_puts("\r\n");
+        EM_ASM({
+            Module.ollamaSend(UTF8ToString($0));
+        }, line_buf);
+        line_len = 0;
+        return;
+    }
+
+    if (strcmp(key, "Backspace") == 0) {
+        if (line_len > 0) { line_len--; app_puts("\x08 \x08"); }
+        return;
+    }
+
+    if (strlen(key) != 1) return;
+
+    char c = key[0];
+    if (c >= 0x20 && c < 0x7F && line_len < LINE_BUF_SZ - 1) {
+        line_buf[line_len++] = c;
+        char echo[2] = {c, '\0'};
+        app_puts(echo);
+    }
+}
+
+/* ================================================================
  * Normal shell commands
  * ================================================================ */
 
@@ -408,6 +512,7 @@ static void cmd_help(void) {
     app_puts("  colors    - Show colour palette\r\n");
     app_puts("  demo      - Start colour animation (press any key to stop)\r\n");
     app_puts("  wargames  - Connect to WOPR\r\n");
+    app_puts("  ollama [model] - Chat with local Ollama (/quit to exit)\r\n");
     app_puts("  about     - About this terminal\r\n");
     sgr("0");
 }
@@ -461,6 +566,12 @@ static void dispatch_command(const char *cmd) {
     if (strcmp(cmd, "colors") == 0)    { cmd_colors();  return; }
     if (strcmp(cmd, "about") == 0)     { cmd_about();   return; }
     if (strcmp(cmd, "wargames") == 0)  { wg_start();    return; }
+    if (strncmp(cmd, "ollama", 6) == 0 && (cmd[6] == ' ' || cmd[6] == '\0')) {
+        const char *m = cmd + 6;
+        while (*m == ' ') m++;
+        cmd_ollama(m);
+        return;
+    }
     if (strcmp(cmd, "demo") == 0) {
         demo_active = 1;
         demo_frame  = 0;
@@ -588,6 +699,11 @@ void app_handle_key(const char *key) {
 
     if (wg_active) {
         wg_handle_key(key);
+        return;
+    }
+
+    if (ollama_active) {
+        ollama_handle_key(key);
         return;
     }
 

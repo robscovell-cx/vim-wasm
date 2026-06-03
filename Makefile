@@ -1,9 +1,9 @@
 CC      := emcc
-CFLAGS  := -O2 -Wall -Wextra -std=c11
+CFLAGS  := -O2 -Wall -Wextra -std=gnu11
 SRCS    := src/terminal.c src/app.c
 TARGET  := web/terminal_wasm.js
 
-EXPORTS := -sEXPORTED_FUNCTIONS='["_term_init","_term_get_cells","_term_cell_size","_term_is_dirty","_term_clear_dirty","_term_cursor_col","_term_cursor_row","_term_send_key","_app_tick","_malloc","_free"]'
+EXPORTS := -sEXPORTED_FUNCTIONS='["_term_init","_term_get_cells","_term_cell_size","_term_is_dirty","_term_clear_dirty","_term_cursor_col","_term_cursor_row","_term_send_key","_app_tick","_ollama_receive","_ollama_ready","_ollama_error","_malloc","_free"]'
 RUNTIME := -sEXPORTED_RUNTIME_METHODS='["ccall","HEAPU8","HEAP32"]'
 MEM     := -sALLOW_MEMORY_GROWTH=0 -sINITIAL_MEMORY=1MB
 

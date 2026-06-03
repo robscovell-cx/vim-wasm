@@ -188,6 +188,99 @@ function drawScanlines() {
   }
 }
 
+/* ================================================================
+ * Ollama chat — fetch + streaming, calls back into WASM
+ * ================================================================ */
+
+let ollamaHistory = [];
+let ollamaModel   = '';
+
+Module.ollamaInit = async function(requestedModel) {
+  try {
+    const resp = await fetch('http://localhost:11434/api/tags');
+    if (!resp.ok) throw new Error('Ollama returned HTTP ' + resp.status);
+    const data   = await resp.json();
+    const models = (data.models || []).map(m => m.name);
+
+    if (models.length === 0) {
+      Module.ccall('ollama_error', null, ['string'],
+        ['No models installed. Run: ollama pull llama3.2']);
+      return;
+    }
+
+    /* Use requested model if available, otherwise first installed */
+    ollamaModel = (requestedModel && models.find(n => n.startsWith(requestedModel)))
+                  || models[0];
+    ollamaHistory = [];
+
+    Module.ccall('ollama_receive', null, ['string'],
+      ['Connected.  Model: ' + ollamaModel + '\r\n']);
+    Module.ccall('ollama_ready', null, [], []);
+  } catch (e) {
+    Module.ccall('ollama_error', null, ['string'],
+      [e.message + ' — is Ollama running? (ollama serve)']);
+  }
+};
+
+Module.ollamaSend = async function(userMsg) {
+  ollamaHistory.push({role: 'user', content: userMsg});
+
+  try {
+    const resp = await fetch('http://localhost:11434/api/chat', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({
+        model:    ollamaModel,
+        messages: ollamaHistory,
+        stream:   true,
+      }),
+    });
+
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
+    Module.ccall('ollama_receive', null, ['string'], ['\r\nAssistant: ']);
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   full    = '';
+    let   partial = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      partial += decoder.decode(value, {stream: true});
+      const lines = partial.split('\n');
+      partial = lines.pop();        /* keep incomplete last line */
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj   = JSON.parse(line);
+          const token = obj.message?.content ?? '';
+          if (token) {
+            full += token;
+            /* Convert bare \n → \r\n for the VT-200 terminal */
+            Module.ccall('ollama_receive', null, ['string'],
+              [token.replace(/\n/g, '\r\n')]);
+          }
+          if (obj.done) {
+            ollamaHistory.push({role: 'assistant', content: full});
+            Module.ccall('ollama_ready', null, [], []);
+            return;
+          }
+        } catch (_) { /* malformed JSON line — skip */ }
+      }
+    }
+    /* Stream ended without a done:true packet */
+    ollamaHistory.push({role: 'assistant', content: full});
+    Module.ccall('ollama_ready', null, [], []);
+
+  } catch (e) {
+    Module.ccall('ollama_error', null, ['string'], [e.message]);
+  }
+};
+
 /* Capture keys the browser would otherwise consume */
 const CAPTURED_KEYS = new Set([
   'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
