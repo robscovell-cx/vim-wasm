@@ -399,6 +399,7 @@ static void wg_handle_key(const char *key) {
  * ================================================================ */
 
 int         curses_active  = 0;   /* extern'd by curses.c */
+int         forth_active   = 0;   /* extern'd by forth.c */
 static int  ollama_active  = 0;
 static int  ollama_waiting = 0;  /* 1 = response in flight */
 static char ollama_model[64]  = "";
@@ -515,6 +516,7 @@ static void cmd_help(void) {
     app_puts("  wargames  - Connect to WOPR\r\n");
     app_puts("  run snake - Launch snake (ncurses)\r\n");
     app_puts("  run tint  - Launch Tint Tetris (ncurses)\r\n");
+    app_puts("  forth     - Interactive Forth interpreter\r\n");
     app_puts("  ollama [model] - Chat with local Ollama (/quit to exit)\r\n");
     app_puts("  about     - About this terminal\r\n");
     sgr("0");
@@ -583,6 +585,11 @@ static void dispatch_command(const char *cmd) {
     if (strcmp(cmd, "colors") == 0)    { cmd_colors();  return; }
     if (strcmp(cmd, "about") == 0)     { cmd_about();   return; }
     if (strcmp(cmd, "wargames") == 0)  { wg_start();    return; }
+    if (strcmp(cmd, "forth") == 0) {
+        extern void forth_start(void);
+        forth_start();
+        return;
+    }
     if (strncmp(cmd, "run", 3) == 0 && (cmd[3] == ' ' || cmd[3] == '\0')) {
         const char *a = cmd + 3;
         while (*a == ' ') a++;
@@ -722,6 +729,12 @@ void app_handle_key(const char *key) {
 
     if (curses_active) {
         /* keys are fed to the curses queue by JS directly via curses_push_key */
+        return;
+    }
+
+    if (forth_active) {
+        extern void forth_handle_key(const char *key);
+        forth_handle_key(key);
         return;
     }
 

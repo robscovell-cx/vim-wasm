@@ -1,6 +1,6 @@
 CC      := emcc
 CFLAGS  := -O2 -Wall -Wextra -std=gnu11
-SRCS    := src/terminal.c src/app.c src/curses.c src/snake.c \
+SRCS    := src/terminal.c src/app.c src/curses.c src/snake.c src/forth.c \
            src/tint/tint.c src/tint/io.c src/tint/engine.c src/tint/utils.c
 TARGET  := web/terminal_wasm.js
 
