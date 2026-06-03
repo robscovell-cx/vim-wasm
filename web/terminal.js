@@ -189,6 +189,63 @@ function drawScanlines() {
 }
 
 /* ================================================================
+ * Curses app launcher — asyncify bridge
+ * ================================================================ */
+
+let cursesActive = false;
+
+const CURSES_KEY_UP        = 0x103;
+const CURSES_KEY_DOWN      = 0x102;
+const CURSES_KEY_LEFT      = 0x104;
+const CURSES_KEY_RIGHT     = 0x105;
+const CURSES_KEY_BACKSPACE = 0x107;
+const CURSES_KEY_HOME      = 0x106;
+const CURSES_KEY_END       = 0x168;
+const CURSES_KEY_PPAGE     = 0x153;
+const CURSES_KEY_NPAGE     = 0x152;
+
+function jsKeyToCurses(e) {
+  switch (e.key) {
+    case 'ArrowUp':    return CURSES_KEY_UP;
+    case 'ArrowDown':  return CURSES_KEY_DOWN;
+    case 'ArrowLeft':  return CURSES_KEY_LEFT;
+    case 'ArrowRight': return CURSES_KEY_RIGHT;
+    case 'Backspace':  return CURSES_KEY_BACKSPACE;
+    case 'Delete':     return 0x14A;
+    case 'Home':       return CURSES_KEY_HOME;
+    case 'End':        return CURSES_KEY_END;
+    case 'PageUp':     return CURSES_KEY_PPAGE;
+    case 'PageDown':   return CURSES_KEY_NPAGE;
+    case 'Enter':      return 10;
+    case 'Escape':     return 27;
+    case 'Tab':        return 9;
+    default:
+      if (e.key.length === 1) return e.key.charCodeAt(0);
+      return -1;
+  }
+}
+
+Module.launchCursesApp = async function(name) {
+  cursesActive = true;
+  try {
+    if (name === 'snake') {
+      await Module.ccall('snake_main', null, [], [], {async: true});
+    } else if (name === 'tint') {
+      /* tint calls exit() at the end — Emscripten throws ExitStatus;
+         endwin() has already restored the shell before exit() is reached */
+      await Module.ccall('tint_main',
+        'number', ['number', 'number'], [0, 0], {async: true});
+    }
+  } catch (e) {
+    /* Swallow Emscripten's ExitStatus (thrown by exit()); re-throw real errors */
+    if (!e || e.name !== 'ExitStatus') throw e;
+  } finally {
+    cursesActive = false;
+    render();
+  }
+};
+
+/* ================================================================
  * Ollama chat — fetch + streaming, calls back into WASM
  * ================================================================ */
 
@@ -296,12 +353,14 @@ function handleKey(e) {
   /* Don't pass modifier-only keys */
   if (['Control','Alt','Shift','Meta','CapsLock'].includes(e.key)) return;
 
-  Module.ccall(
-    'term_send_key',
-    null,
-    ['string'],
-    [e.key]
-  );
+  if (cursesActive) {
+    const code = jsKeyToCurses(e);
+    if (code >= 0) Module._curses_push_key(code);
+    /* render is driven by wrefresh() setting dirty inside the curses app */
+    return;
+  }
+
+  Module.ccall('term_send_key', null, ['string'], [e.key]);
 
   /* Render immediately for snappy response */
   Module._term_clear_dirty();

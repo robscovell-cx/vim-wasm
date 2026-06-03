@@ -398,6 +398,7 @@ static void wg_handle_key(const char *key) {
  * Ollama chat
  * ================================================================ */
 
+int         curses_active  = 0;   /* extern'd by curses.c */
 static int  ollama_active  = 0;
 static int  ollama_waiting = 0;  /* 1 = response in flight */
 static char ollama_model[64]  = "";
@@ -512,6 +513,8 @@ static void cmd_help(void) {
     app_puts("  colors    - Show colour palette\r\n");
     app_puts("  demo      - Start colour animation (press any key to stop)\r\n");
     app_puts("  wargames  - Connect to WOPR\r\n");
+    app_puts("  run snake - Launch snake (ncurses)\r\n");
+    app_puts("  run tint  - Launch Tint Tetris (ncurses)\r\n");
     app_puts("  ollama [model] - Chat with local Ollama (/quit to exit)\r\n");
     app_puts("  about     - About this terminal\r\n");
     sgr("0");
@@ -554,6 +557,20 @@ static void cmd_about(void) {
     sgr("0");
 }
 
+static void cmd_run(const char *app_name) {
+    if (strcmp(app_name, "snake") == 0 || strcmp(app_name, "tint") == 0) {
+        curses_active = 1;
+        EM_ASM({
+            var n = UTF8ToString($0);
+            setTimeout(function() { Module.launchCursesApp(n); }, 0);
+        }, app_name);
+    } else if (strlen(app_name) == 0) {
+        app_puts("\r\nUsage: run <app>  (available: snake, tint)\r\n");
+    } else {
+        app_printf("\r\nunknown app: %s\r\n", app_name);
+    }
+}
+
 static void cmd_unknown(const char *cmd) {
     app_printf("\r\n" CSI "31munknown command: %s" CSI "0m\r\n", cmd);
 }
@@ -566,6 +583,12 @@ static void dispatch_command(const char *cmd) {
     if (strcmp(cmd, "colors") == 0)    { cmd_colors();  return; }
     if (strcmp(cmd, "about") == 0)     { cmd_about();   return; }
     if (strcmp(cmd, "wargames") == 0)  { wg_start();    return; }
+    if (strncmp(cmd, "run", 3) == 0 && (cmd[3] == ' ' || cmd[3] == '\0')) {
+        const char *a = cmd + 3;
+        while (*a == ' ') a++;
+        cmd_run(a);
+        return;
+    }
     if (strncmp(cmd, "ollama", 6) == 0 && (cmd[6] == ' ' || cmd[6] == '\0')) {
         const char *m = cmd + 6;
         while (*m == ' ') m++;
@@ -694,6 +717,11 @@ void app_handle_key(const char *key) {
         clear_screen();
         app_init();
         line_len = 0;
+        return;
+    }
+
+    if (curses_active) {
+        /* keys are fed to the curses queue by JS directly via curses_push_key */
         return;
     }
 
