@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VT-200 Terminal</title>
+  <link rel="preload" href="VT323-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="bezel">
+    <div id="screen">
+      <canvas id="terminal"></canvas>
+    </div>
+    <div id="label">DEC VT200  ·  80×24</div>
+  </div>
+  <script>
+    var Module = {
+      onRuntimeInitialized: function() {
+        if (typeof initTerminal === 'function') initTerminal();
+      }
+    };
+  </script>
+  <script src="terminal_wasm.js"></script>
+  <script src="terminal.js"></script>
+</body>
+</html>
