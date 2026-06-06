@@ -13,7 +13,7 @@ RUNTIME := -sEXPORTED_RUNTIME_METHODS='["ccall","HEAPU8","HEAP32"]'
 MEM     := -sALLOW_MEMORY_GROWTH=0 -sINITIAL_MEMORY=2MB
 ASYNC   := -sASYNCIFY -sASYNCIFY_STACK_SIZE=65536
 
-.PHONY: all clean serve
+.PHONY: all clean serve kill
 
 all: $(TARGET)
 
@@ -28,3 +28,6 @@ clean:
 
 serve:
 	python3 -m http.server 8080 --directory web
+
+kill:
+	@pkill -f "python3 -m http.server 8080" || true
