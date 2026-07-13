@@ -3,32 +3,40 @@
 # Regenerate by invoking the code-map skill.
 
 version: 1
-generated: "2026-06-03T00:00:00Z"
+generated: "2026-07-13T00:00:00Z"
 
 overview:
   name: "vim-wasm"
-  purpose: "DEC VT-220 terminal emulator running in the browser; C state machine compiled to WASM, rendered on HTML5 Canvas"
+  purpose: "DEC VT-220 terminal emulator running in the browser; C state machine compiled to WASM, rendered on HTML5 Canvas. Also hosts a small ncurses-compatible layer running Snake, a Tetris clone (Tint), and a Forth interpreter as in-terminal apps"
   tech:
     - "C (gnu11)"
-    - "WebAssembly (Emscripten 5.0.7)"
+    - "WebAssembly (Emscripten, ASYNCIFY)"
     - "HTML5 Canvas"
     - "Vanilla JavaScript (ES2020)"
-  architecture: "keydown → JS → ccall(term_send_key) → C app layer → terminal_write() → VT-200 parser → Cell[24][80] in WASM linear memory → JS render() reads via HEAPU8/HEAP32 → Canvas fillText"
+  architecture: "keydown → JS → ccall(term_send_key) → C app layer → terminal_write() → VT-200 parser → Cell[24][80] in WASM linear memory → JS render() reads via HEAPU8/HEAP32 → Canvas fillText. For 'run snake'/'run tint': JS launchCursesApp() → ccall(..., {async:true}) into an ASYNCIFY'd blocking C event loop → src/curses.c emulates ncurses on top of terminal_write()/Terminal.cells, fed by curses_push_key() from JS"
 
 directories:
-  "src/":   "C source — VT-200 parser, app layer, and shared header"
-  "web/":   "Browser deliverables — HTML, JS, CSS, font, and build artifacts"
+  "src/":      "C source — VT-200 parser, app layer, curses compat layer, Forth interpreter, Snake"
+  "src/tint/": "Vendored TINT (Tetris clone) source, built against src/curses.h instead of system ncurses"
+  "web/":      "Browser deliverables — HTML, JS, CSS, font, and build artifacts"
 
 wasm_module:
   source_files:
     - "src/terminal.c"
     - "src/app.c"
+    - "src/curses.c"
+    - "src/snake.c"
+    - "src/forth.c"
+    - "src/tint/tint.c"
+    - "src/tint/io.c"
+    - "src/tint/engine.c"
+    - "src/tint/utils.c"
   outputs:
     - "web/terminal_wasm.js"   # Emscripten glue
     - "web/terminal_wasm.wasm" # compiled module (gitignored)
-  build: "make  (emcc -O2 -std=gnu11 --no-entry -sENVIRONMENT=web)"
+  build: "make  (emcc -O2 -std=gnu11 --no-entry -sENVIRONMENT=web -sASYNCIFY; tint compiled with -I src/ -DUSE_RAND -DSCOREFILE=\"/tint.scores\")"
   serve: "make serve  (python3 -m http.server 8080 --directory web)"
-  memory: "fixed 1 MB (ALLOW_MEMORY_GROWTH=0)"
+  memory: "fixed 2 MB (ALLOW_MEMORY_GROWTH=0, INITIAL_MEMORY=2MB)"
 
 # ── C / WASM API surface ───────────────────────────────────────────
 
@@ -48,6 +56,15 @@ wasm_exports:
     - "ollama_receive(const char *text) → JS callback: append streamed token to terminal"
     - "ollama_ready()                    → JS callback: response complete, show 'You:' prompt"
     - "ollama_error(const char *msg)     → JS callback: display error, re-show prompt"
+
+  curses_c:
+    - "curses_push_key(int key) → JS pushes a translated keycode into the curses key queue"
+
+  snake_c:
+    - "snake_main() → int  → blocking curses game loop; invoked async via ccall({async:true})"
+
+  tint_c:
+    - "tint_main(int argc, char **argv) → int  → blocking curses game loop (renamed from upstream main()); invoked async via ccall({async:true})"
 
 # ── Data structures ───────────────────────────────────────────────
 
@@ -118,8 +135,9 @@ c_modules:
     modes:
       shell:
         prompt: "vt200> "
-        commands: ["help", "clear", "colors", "demo", "wargames", "ollama [model]", "about"]
+        commands: ["help", "clear", "colors", "demo", "wargames", "run <snake|tint>", "forth", "ollama [model]", "about"]
         state: "line_buf[256], line_len, history[8][256], hist_head/cnt/idx"
+        curses_launch: "cmd_run() sets curses_active=1, EM_ASM schedules Module.launchCursesApp(name) via setTimeout(0) so the C command handler can return before the async curses loop takes over input"
       demo:
         trigger: "demo command"
         state: "demo_active, demo_frame"
@@ -142,13 +160,61 @@ c_modules:
         flow: "cmd_ollama → EM_ASM(Module.ollamaInit) → [JS fetch] → ollama_receive/ready/error callbacks"
         exit: "/quit command"
         input: "shared line_buf/line_len with shell mode"
+      curses_app:
+        trigger: "run snake / run tint"
+        state: "curses_active (extern, shared with curses.c/JS via cursesActive)"
+        flow: "cmd_run → EM_ASM(setTimeout(Module.launchCursesApp)) → async ccall(snake_main/tint_main) blocks in WASM via ASYNCIFY"
+        exit: "game loop returns, or C exit() → Emscripten ExitStatus caught in JS"
+
+  - name: "curses.c — ncurses-compatible layer"
+    path: "src/curses.c"
+    purpose: "Minimal ncurses reimplementation so vendored curses programs (Snake, Tint) can render onto Terminal.cells without a real terminal/stdin"
+    key_functions:
+      - "initscr()/endwin()      → set up/tear down stdscr, restore shell prompt on exit"
+      - "wrefresh(win)/refresh() → diff WINDOW buffer against screen_shadow, emit only changed cells via terminal_write()"
+      - "wgetch(win)/getch()     → pop next key from the queue fed by curses_push_key(); ERR if empty"
+      - "start_color()/init_pair()/COLOR_PAIR() → color_pairs[] table → SGR sequences"
+      - "curses_push_key(int)    → EMSCRIPTEN_KEEPALIVE; JS pushes a translated keycode (see terminal.js jsKeyToCurses)"
+    key_state:
+      - "stdscr, curscr: WINDOW*  — like real curses, curscr is the 'currently displayed' shadow"
+      - "screen_shadow[24][80]: Cell — last-drawn state, diffed on refresh to minimise terminal_write() calls"
+      - "kq[64]: int — ring buffer of pending keycodes"
+    note: "Blocking programs (Snake, Tint) run their normal `while (1) { ch = getch(); ... }` loop; ASYNCIFY lets that C loop suspend/resume around the JS event loop instead of needing a callback-based rewrite"
+
+  - name: "snake.c — Snake game"
+    path: "src/snake.c"
+    purpose: "Classic Snake implemented directly against src/curses.h (no vendored dependency)"
+    key_props:
+      - "78×22 playfield inset into the 80×24 terminal (FW/FH), bottom interior row reserved for the score line"
+      - "snake_main() is the sole export; drives its own getch()-driven game loop and returns when the game ends"
+
+  - name: "forth.c — Forth interpreter"
+    path: "src/forth.c"
+    purpose: "Full interactive Forth (token-threaded, pointer-tagged literals, backpatched control structures) run as a line-buffered shell mode — no ASYNCIFY needed since it's a synchronous line-by-line REPL"
+    key_state:
+      - "forth_active (extern, checked by app_handle_key to route lines into the Forth REPL instead of dispatch_command)"
+      - "data/return/control-flow/loop stacks; word pool (NW), body pool (BP), string pool (SP), compile buffer (CB)"
+    key_functions:
+      - "forth_start()  → enter Forth mode, print banner"
+      - "prim_bye()      → BYE word: sets forth_active=0, returns to vt200> shell prompt"
+    exit: "BYE word (or 'bye' at the prompt)"
+
+  - name: "src/tint/ — vendored TINT (Tetris clone)"
+    path: "src/tint/"
+    purpose: "Upstream TINT ('Tint Is Not Tetris') curses game, adapted to build against src/curses.h and run non-interactively in WASM"
+    files: ["tint.c", "engine.c", "io.c", "utils.c", "config.h", "engine.h", "typedefs.h"]
+    wasm_patches:
+      - "getname() no longer prompts via stdin (no real TTY in the browser) — hardcoded to a fixed default name"
+      - "choose_level() no longer prompts via stdin — hardcoded to MINLEVEL"
+      - "main() renamed to tint_main() so it's an on-demand Emscripten export, not the module entry point"
+    build_flags: "-I src/ -DUSE_RAND -DSCOREFILE='\"/tint.scores\"' -Wno-macro-redefined (tint's io.h redefines COLOR_* macros already provided by src/curses.h)"
 
 # ── JavaScript layer ──────────────────────────────────────────────
 
 js_modules:
   - name: "terminal.js"
     path: "web/terminal.js"
-    purpose: "WASM bootstrap, canvas renderer, keyboard input, Ollama fetch client"
+    purpose: "WASM bootstrap, canvas renderer, keyboard input, curses app launcher, Ollama fetch client"
     key_globals:
       - "FG_PALETTE[9], BG_PALETTE[9], FG_BOLD_PALETTE[9] — phosphor-green colour maps"
       - "cellBufPtr: uintptr_t — pointer into WASM heap, stored once from term_get_cells()"
@@ -156,6 +222,7 @@ js_modules:
       - "cursorVisible — toggled at 530ms for 1.9 Hz blink"
       - "ollamaHistory[] — full message array for /api/chat multi-turn context"
       - "ollamaModel — active model name, resolved from /api/tags on connect"
+      - "cursesActive — while true, handleKey() routes keys to the curses queue instead of term_send_key"
     key_functions:
       - "initTerminal()      → called from Module.onRuntimeInitialized"
       - "measureAndInit()    → waits for fonts, sets canvas size, calls term_init()"
@@ -163,7 +230,9 @@ js_modules:
       - "render()            → full 80×24 redraw via HEAPU8/HEAP32 direct memory read"
       - "drawCursor()        → 'difference' composite op block cursor"
       - "drawScanlines()     → rgba(0,0,0,0.15) stripes every other row"
-      - "handleKey(e)        → preventDefault for captured keys, ccall(term_send_key)"
+      - "handleKey(e)        → preventDefault for captured keys; routes to curses queue or ccall(term_send_key) depending on cursesActive"
+      - "jsKeyToCurses(e)    → maps JS KeyboardEvent.key to ncurses KEY_* codes (arrows, backspace, home/end, page up/down)"
+      - "Module.launchCursesApp(name) → async; ccall(snake_main/tint_main, {async:true}); swallows Emscripten ExitStatus; restores prompt via render() in finally"
       - "Module.ollamaInit   → fetch /api/tags, resolve model, call ollama_receive+ready"
       - "Module.ollamaSend   → POST /api/chat streaming, token-by-token ccall(ollama_receive)"
     cell_memory_layout: |
@@ -182,9 +251,24 @@ relationships:
     note: "JS keydown event entry point; ccall passes UTF-8 key string"
 
   - from: "app_handle_key"
-    to: "dispatch_command / wg_handle_key / ollama_handle_key"
+    to: "dispatch_command / wg_handle_key / ollama_handle_key / forth line input"
     type: manages
-    note: "dispatches to active mode based on demo_active / wg_active / ollama_active flags"
+    note: "dispatches to active mode based on demo_active / wg_active / ollama_active / forth_active flags"
+
+  - from: "JS Module.launchCursesApp"
+    to: "snake_main / tint_main (C, async ccall)"
+    type: calls
+    note: "ASYNCIFY lets the blocking curses game loop suspend across rAF frames instead of freezing the tab"
+
+  - from: "curses.c wgetch/getch"
+    to: "curses_push_key queue (filled by JS handleKey via jsKeyToCurses)"
+    type: depends
+    note: "only input path into Snake/Tint while cursesActive is set"
+
+  - from: "curses.c wrefresh/refresh"
+    to: "terminal_write"
+    type: calls
+    note: "diffs WINDOW contents against screen_shadow, writes only changed cells as VT-200 sequences"
 
   - from: "app.c (all modes)"
     to: "terminal_write"
@@ -221,12 +305,13 @@ relationships:
 cross_cutting:
   rendering: "Dirty-flag polling in rAF loop; full 80×24 redraw per dirty frame (~0.2ms)"
   fonts: "VT323-Regular.woff2 self-hosted; document.fonts.ready gate before first render"
-  memory: "Fixed 1 MB WASM heap; Cell buffer = 15,360 bytes; no dynamic allocation at runtime"
+  memory: "Fixed 2 MB WASM heap (INITIAL_MEMORY=2MB, no growth); Cell buffer = 15,360 bytes"
   cursor: "setInterval(530ms) toggles cursorVisible; difference composite for XOR-style block"
   visual_fx: "CRT scanlines via semi-transparent fillRect; CSS box-shadow phosphor bloom on bezel"
   external_api: "Ollama at http://localhost:11434 — fetch /api/tags (model list) + POST /api/chat (streaming)"
   error_handling: "Ollama errors surface via ollama_error() C export; WOPR Escape key for hard abort"
-  build: "Emscripten emcc; -std=gnu11 required for EM_ASM macro; ENVIRONMENT=web strips Node.js code"
+  build: "Emscripten emcc; -std=gnu11 required for EM_ASM macro; ENVIRONMENT=web strips Node.js code; ASYNCIFY required for blocking curses game loops (Snake, Tint)"
+  curses_compat: "src/curses.c implements just enough ncurses (WINDOW, colour pairs, getch/refresh) for vendored games to run unmodified against the VT-200 cell buffer"
 
 # ── Conventions ───────────────────────────────────────────────────
 
@@ -241,3 +326,7 @@ conventions:
   - "All escape sequences use ESC/CSI macros defined in app.c: ESC='\x1B', CSI=ESC'['"
   - "gnu11 (not c11) required due to EM_ASM statement-expression extension"
   - "canvas.width/height assignment resets all 2D context state; set ctx.textBaseline='top' inside render()"
+  - "curses.h COLOR_* macros are guarded with #ifndef so vendored code (e.g. tint's io.h) can redefine them without conflict"
+  - "Blocking C event loops (Snake, Tint) only work because the build is compiled with ASYNCIFY; new blocking curses apps must be added to the Makefile EXPORTS and invoked with ccall({async:true})"
+  - "Vendored third-party sources (src/tint/) are patched minimally and only where required for the WASM/browser environment (no real stdin, single entry point) — patches are called out inline rather than silently diverging from upstream"
+  - "Forth is a synchronous shell mode (forth_active flag), unlike the curses apps — it never blocks, so it needs no ASYNCIFY/async ccall"
